@@ -81,6 +81,7 @@ This repo contains a **single PowerShell script** that installs **Triton** and *
 | ---------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | Execution        | `-DryRun`                                                            | Execute detection and planning, but don’t install/uninstall or write files.                                          |
 | Output           | `-DebugLog` / `-TraceScript`                                         | Print timings and very verbose execution details.                                                                    |
+| SageAttention    | `-SageVersion Auto` (default), `2`, `3`, `All`                      | Select SageAttention version. Auto detects Blackwell (RTX 50xx) and modern Torch to choose v3 or v2.                 |
 | Torch (force)    | `-TorchVersion 2.8.0 -CudaTag cu128`                                 | Install exactly this Torch + CUDA before SageAttention.                                                              |
 | Torch (auto)     | *(default)*                                                          | If Torch is missing, tries CUDA builds that fit your GPU/driver; CPU only as last resort (SageAttention needs CUDA). |
 | Pip control      | `-PipIndexUrl` / `-PipExtraIndexUrl`                                 | Point pip at custom indexes (e.g., PyTorch wheels).                                                                  |
@@ -167,6 +168,14 @@ Plan only (no changes, but real detections and resolution):
   Start ComfyUI with SageAttention:
     .\run_nvidia_gpu_sageattention.bat
 ```
+
+---
+
+## ⚡ SageAttention 2 vs. SageAttention 3
+
+* **SageAttention 2 (`sageattention`)**: Standard SageAttention (up to Torch 2.10). Enabled globally via ComfyUI's `--use-sage-attention` launch flag.
+* **SageAttention 3 (`sageattn3`)**: Supports Blackwell architectures (RTX 5070 Ti, RTX 5080, RTX 5090, B100/B200) and modern PyTorch (2.12, 2.13, 2.14). ComfyUI and supported custom nodes (such as WanVideo and LTX-Video) automatically utilize `sageattn3` via the registered `sage3` kernel.
+* **Auto Detection**: When `-SageVersion Auto` (the default) is used, the script checks your GPU and Torch version to pick the best wheel (`sageattn3` on Blackwell / Torch 2.13+, or `sageattention` on earlier setups).
 
 ---
 

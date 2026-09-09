@@ -36,6 +36,10 @@ param(
   [string] $TorchVersion,  # e.g., 2.8.0
   [string] $CudaTag,       # e.g., cu129 or cu128
 
+  # --- SageAttention Version Selection ---
+  [ValidateSet('Auto', '2', '3', 'All')]
+  [string] $SageVersion = 'Auto',
+
   # --- Packages / Indexes ---
   [string] $TritonConstraint = "triton-windows<3.4",
   [string] $PipIndexUrl = "https://pypi.org/simple",
@@ -421,19 +425,56 @@ function Get-Prop($obj, [string[]]$names) {
   return $null
 }
 
-function Version-MM([string]$ver) {
-  if ([string]::IsNullOrWhiteSpace($ver)) { return $null }
-  $m = [regex]::Match($ver, '^\s*(\d+)\.(\d+)')
+function Version-MM($ver) {
+  if ($null -eq $ver) { return $null }
+  if ($ver -is [System.Array] -or $ver -is [System.Collections.IList]) {
+    if ($ver.Count -gt 0 -and $null -ne $ver[0]) { $ver = [string]$ver[0] } else { return $null }
+  }
+  $s = [string]$ver
+  if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+  $m = [regex]::Match($s, '^\s*(\d+)\.(\d+)')
   if ($m.Success) { return ("{0}.{1}" -f $m.Groups[1].Value, $m.Groups[2].Value) }
   return $null
 }
 
-function Python-Match($wheelPy, [string]$wantMM, [switch]$AllowAbi3) {
-  if (-not $wheelPy) { return $true } # permissive if absent
-  $s = [string]$wheelPy
+function To-VersionSafe([string]$s) {
+  if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+  $m = [regex]::Match($s, '(\d+(\.\d+)+)')
+  if ($m.Success) {
+    $vStr = $m.Groups[1].Value
+    $parts = $vStr.Split('.')
+    if ($parts.Count -eq 1) { $vStr += ".0" }
+    try { return [version]$vStr } catch {}
+  }
+  return $null
+}
 
+function Python-Match($wheelPy, [string]$wantMM, [switch]$AllowAbi3) {
+  if ($null -eq $wheelPy) { return $true } # permissive if absent
+  $wantV = To-VersionSafe $wantMM
+
+  # Array format: [min, max]
+  if ($wheelPy -is [System.Array] -or $wheelPy -is [System.Collections.IList]) {
+    $minStr = if ($wheelPy.Count -ge 1 -and $null -ne $wheelPy[0]) { [string]$wheelPy[0] } else { $null }
+    $maxStr = if ($wheelPy.Count -ge 2 -and $null -ne $wheelPy[1]) { [string]$wheelPy[1] } else { $null }
+
+    if ($minStr -and $maxStr) {
+      if ($minStr -eq $maxStr) { return ($minStr -eq $wantMM -or (Version-MM $minStr) -eq $wantMM) }
+      $minV = To-VersionSafe $minStr
+      $maxV = To-VersionSafe $maxStr
+      if ($minV -and $maxV -and $wantV) { return ($wantV -ge $minV -and $wantV -le $maxV) }
+      return ($wantMM -ge $minStr -and $wantMM -le $maxStr)
+    } elseif ($minStr -and -not $maxStr) {
+      $minV = To-VersionSafe $minStr
+      if ($wantV -and $minV -and ($wantV -ge $minV)) { return [bool]$AllowAbi3 }
+      return [bool]$AllowAbi3
+    }
+    return $true
+  }
+
+  $s = [string]$wheelPy
   # exact like "3.12"
-  if ($s -match '^\s*\d+\.\d+\s*$') { return ($s -eq $wantMM) }
+  if ($s -match '^\s*\d+\.\d+\s*$') { return ($s.Trim() -eq $wantMM) }
 
   # ranges like ">=3.9", ">3.9", "3.9+"
   if ($s -match '>=\s*(\d+\.\d+)') { return ([version]$wantMM -ge [version]$Matches[1]) }
@@ -448,17 +489,59 @@ function Python-Match($wheelPy, [string]$wantMM, [switch]$AllowAbi3) {
 }
 
 function Torch-Match($wheelTorch, [string]$wantFull) {
-  if (-not $wheelTorch) { return $true } # permissive if absent
+  if ($null -eq $wheelTorch) { return $true } # permissive if absent
   $mmWant = Version-MM $wantFull
-  $mmHave = Version-MM ([string]$wheelTorch)
-  if ($wheelTorch -eq $wantFull) { return $true }
+  $wantV  = To-VersionSafe $wantFull
+
+  # Array format: [min, max]
+  if ($wheelTorch -is [System.Array] -or $wheelTorch -is [System.Collections.IList]) {
+    $minStr = if ($wheelTorch.Count -ge 1 -and $null -ne $wheelTorch[0]) { [string]$wheelTorch[0] } else { $null }
+    $maxStr = if ($wheelTorch.Count -ge 2 -and $null -ne $wheelTorch[1]) { [string]$wheelTorch[1] } else { $null }
+
+    if ($minStr -and $maxStr) {
+      if ($minStr -eq $maxStr) {
+        if ($minStr -eq $wantFull) { return $true }
+        if ((Version-MM $minStr) -eq $mmWant) { return $true }
+        return $false
+      }
+      $minV = To-VersionSafe $minStr
+      $maxV = To-VersionSafe $maxStr
+      if ($minV -and $maxV -and $wantV) {
+        return ($wantV -ge $minV -and $wantV -le $maxV)
+      }
+      return ($wantFull -ge $minStr -and $wantFull -le $maxStr)
+    } elseif ($minStr -and -not $maxStr) {
+      $minV = To-VersionSafe $minStr
+      if ($wantV -and $minV) {
+        return ($wantV -ge $minV)
+      }
+      return $true
+    }
+    return $true
+  }
+
+  $s = [string]$wheelTorch
+  $mmHave = Version-MM $s
+  if ($s -eq $wantFull) { return $true }
   if ($mmHave -and $mmWant -and ($mmHave -eq $mmWant)) { return $true }
   return $false
 }
 
-function Cuda-Match([string]$wheelCuda, [string]$wantPretty) {
-  if (-not $wheelCuda) { return $true } # permissive if absent
-  $s = ($wheelCuda -replace '[^\d\.]','').Trim()
+function Cuda-Match($wheelCuda, [string]$wantPretty) {
+  if ($null -eq $wheelCuda) { return $true } # permissive if absent
+
+  # Array format: [min, max]
+  if ($wheelCuda -is [System.Array] -or $wheelCuda -is [System.Collections.IList]) {
+    foreach ($item in $wheelCuda) {
+      if ($null -ne $item) {
+        $s = ([string]$item -replace '[^\d\.]','').Trim()
+        if ($s -eq $wantPretty) { return $true }
+      }
+    }
+    return $false
+  }
+
+  $s = ([string]$wheelCuda -replace '[^\d\.]','').Trim()
   if ($s -eq $wantPretty) { return $true }
   return $false
 }
@@ -466,10 +549,11 @@ function Cuda-Match([string]$wheelCuda, [string]$wantPretty) {
 function Resolve-AIWheelsUrl {
   param(
     [Parameter(Mandatory)] $IndexObj,
-    [Parameter(Mandatory)][string] $PackageName,    # e.g., "SageAttention", "Flash Attention"
+    [Parameter(Mandatory)][string] $PackageName,    # e.g., "SageAttention", "sageattn3", "Flash Attention"
     [Parameter(Mandatory)][string] $TorchVer,       # e.g., 2.8.0
     [Parameter(Mandatory)][string] $CudaTag,        # e.g., cu128
     [Parameter(Mandatory)][string] $PythonMM,       # e.g., 3.12
+    [string] $TargetSageVersion = $null,            # "2", "3", or $null
     [switch] $SageAttentionV22Only,
     [switch] $AllowAbi3Fallback
   )
@@ -483,6 +567,14 @@ function Resolve-AIWheelsUrl {
     $pname = [string](Get-Prop $p @('name','title','id','slug'))
     if (-not $pname) { continue }
     $normHave = Normalize-Name $pname
+    $pkgId = [string]$p.id
+
+    # SageAttention specific targeting
+    if ($normWant -match '^sageattention' -or $normWant -match '^sageattn') {
+      if ($TargetSageVersion -eq '2' -and $pkgId -ne 'sageattention' -and $normHave -notmatch 'sageattention(?!3)') { continue }
+      if ($TargetSageVersion -eq '3' -and $pkgId -ne 'sageattn3' -and $normHave -notmatch 'sageattn3') { continue }
+    }
+
     if ($normHave -eq $normWant) { $pkgs += ,$p; continue }
     if ($normHave -match [regex]::Escape($normWant) -or $normWant -match [regex]::Escape($normHave)) { $pkgs += ,$p }
   }
@@ -492,17 +584,25 @@ function Resolve-AIWheelsUrl {
   $cands = @()
   foreach ($pkg in $pkgs) {
     foreach ($w in @($pkg.wheels)) {
+      $pv = [string](Get-Prop $w @('package_version','version','pkg_version'))
+      $note = [string](Get-Prop $w @('variant','note','notes'))
+
       # optional filter: SageAttention 2.2 only
       if ($SageAttentionV22Only) {
-        $pv = [string](Get-Prop $w @('package_version','version','pkg_version'))
-        $note = [string](Get-Prop $w @('variant','note','notes'))
         $pvOk = ($pv -match '^\s*2\.2') -or ($note -match '2\.2') -or ($note -match 'SageAttention2')
         if (-not $pvOk) { continue }
       }
 
-      $wTorch  = [string](Get-Prop $w @('torch','pytorch','pytorch_version','torch_version'))
-      $wPy     = [string](Get-Prop $w @('python','python_version','py'))
-      $wCuda   = [string](Get-Prop $w @('cuda','cuda_version','cu'))
+      # Filter if target sage version specified
+      if ($TargetSageVersion -eq '2') {
+        if ($pkg.id -eq 'sageattn3' -or ($pv -match '^\s*[13]\.' -and $pkg.id -ne 'sageattention')) { continue }
+      } elseif ($TargetSageVersion -eq '3') {
+        if ($pkg.id -eq 'sageattention' -and $pv -match '^\s*2\.') { continue }
+      }
+
+      $wTorch  = Get-Prop $w @('torch','pytorch','pytorch_version','torch_version')
+      $wPy     = Get-Prop $w @('python','python_version','py')
+      $wCuda   = Get-Prop $w @('cuda','cuda_version','cu')
       $wUrl    = [string](Get-Prop $w @('url','href','download'))
       $wCxxAbi = [string](Get-Prop $w @('cxx11abi','abi','abi3'))
 
@@ -514,23 +614,26 @@ function Resolve-AIWheelsUrl {
 
       if ($okTorch -and $okPy -and $okCuda) {
         $score = 0
-        if ($wTorch -eq $TorchVer) { $score += 3 } elseif (Version-MM $wTorch -eq Version-MM $TorchVer) { $score += 2 }
-        if ($wCuda -match [regex]::Escape($wantCudaPretty)) { $score += 2 }
-        if ($wPy -match [regex]::Escape($PythonMM)) { $score += 1 }
+        $tFirst = if ($wTorch -is [System.Array] -or $wTorch -is [System.Collections.IList]) { $wTorch[0] } else { $wTorch }
+        if ($tFirst -eq $TorchVer) { $score += 4 } elseif ((Version-MM $tFirst) -eq (Version-MM $TorchVer)) { $score += 2 }
+        $cFirst = if ($wCuda -is [System.Array] -or $wCuda -is [System.Collections.IList]) { $wCuda[0] } else { $wCuda }
+        if ([string]$cFirst -match [regex]::Escape($wantCudaPretty)) { $score += 2 }
+        $pFirst = if ($wPy -is [System.Array] -or $wPy -is [System.Collections.IList]) { $wPy[0] } else { $wPy }
+        if ([string]$pFirst -match [regex]::Escape($PythonMM)) { $score += 2 }
         if ($wCxxAbi -match '(?i)TRUE') { $score += 1 }
-        $cands += ,([pscustomobject]@{ url=$wUrl; score=$score; torch=$wTorch; py=$wPy; cuda=$wCuda })
+        $cands += ,([pscustomobject]@{ url=$wUrl; score=$score; pkgId=$pkg.id; version=$pv; torch=$wTorch; py=$wPy; cuda=$wCuda })
       }
     }
   }
 
   if ($cands.Count -eq 0 -and $wantCudaPretty -eq '12.9') {
     # CUDA minor fallback: try 12.8
-    return Resolve-AIWheelsUrl -IndexObj $IndexObj -PackageName $PackageName -TorchVer $TorchVer -CudaTag 'cu128' -PythonMM $PythonMM -SageAttentionV22Only:$SageAttentionV22Only -AllowAbi3Fallback:$AllowAbi3Fallback
+    return Resolve-AIWheelsUrl -IndexObj $IndexObj -PackageName $PackageName -TorchVer $TorchVer -CudaTag 'cu128' -PythonMM $PythonMM -TargetSageVersion $TargetSageVersion -SageAttentionV22Only:$SageAttentionV22Only -AllowAbi3Fallback:$AllowAbi3Fallback
   }
 
   if ($cands.Count -eq 0 -and $AllowAbi3Fallback -eq $false) {
     # Retry with ABI3 fallback enabled
-    return Resolve-AIWheelsUrl -IndexObj $IndexObj -PackageName $PackageName -TorchVer $TorchVer -CudaTag $CudaTag -PythonMM $PythonMM -SageAttentionV22Only:$SageAttentionV22Only -AllowAbi3Fallback
+    return Resolve-AIWheelsUrl -IndexObj $IndexObj -PackageName $PackageName -TorchVer $TorchVer -CudaTag $CudaTag -PythonMM $PythonMM -TargetSageVersion $TargetSageVersion -SageAttentionV22Only:$SageAttentionV22Only -AllowAbi3Fallback
   }
 
   if ($cands.Count -eq 0) {
@@ -543,10 +646,11 @@ function Resolve-AIWheelsUrl {
 
 function Install-AIWheel-FromIndex {
   param(
-    [Parameter(Mandatory)][string] $Package,      # "SageAttention" / "Flash Attention" / …
+    [Parameter(Mandatory)][string] $Package,      # "SageAttention" / "SageAttention 3" / …
     [Parameter(Mandatory)][string] $TorchVer,
     [Parameter(Mandatory)][string] $CudaTag,
     [Parameter(Mandatory)][string] $PythonMM,
+    [string] $TargetSageVersion = $null,
     [switch] $SageAttentionV22Only,
     [switch] $AllowAbi3Fallback
   )
@@ -555,7 +659,7 @@ function Install-AIWheel-FromIndex {
   Write-Info ("Selecting a compatible wheel (Torch {0}, CUDA {1}, Python {2}) …" -f $TorchVer, $CudaTag, $PythonMM)
 
   $index = Get-WheelsIndex
-  $url = Resolve-AIWheelsUrl -IndexObj $index -PackageName $Package -TorchVer $TorchVer -CudaTag $CudaTag -PythonMM $PythonMM -SageAttentionV22Only:$SageAttentionV22Only -AllowAbi3Fallback:$AllowAbi3Fallback
+  $url = Resolve-AIWheelsUrl -IndexObj $index -PackageName $Package -TorchVer $TorchVer -CudaTag $CudaTag -PythonMM $PythonMM -TargetSageVersion $TargetSageVersion -SageAttentionV22Only:$SageAttentionV22Only -AllowAbi3Fallback:$AllowAbi3Fallback
 
   $wheelName = Split-Path -Leaf $url
   Write-Ok ("Wheel selected: {0}" -f $wheelName)
@@ -564,6 +668,7 @@ function Install-AIWheel-FromIndex {
   Write-Info ("Installing {0} …" -f $Package)
   Pip @('install', $url)
   Write-Ok ("{0} installed." -f $Package)
+  return $url
 }
 
 # --------------------- Install / Uninstall -----------------------------------
@@ -599,10 +704,20 @@ function Install-TorchExact([string] $Version, [string] $Cuda) {
   Write-Ok "Torch installed (forced)."
 }
 
-function Uninstall-Sage  {
+function Uninstall-Sage([string]$Target = 'all') {
   Write-Section "SageAttention"
-  if (-not $SkipUninstall) { Write-Info "Removing existing SageAttention …"; Pip @('uninstall','-y','sageattention') }
-  else { Write-Info "Skipping uninstall (SageAttention)" }
+  if (-not $SkipUninstall) {
+    if ($Target -in @('all','2')) {
+      Write-Info "Removing existing SageAttention (v2) if present …"
+      try { Pip @('uninstall','-y','sageattention') } catch {}
+    }
+    if ($Target -in @('all','3')) {
+      Write-Info "Removing existing SageAttention 3 (sageattn3) if present …"
+      try { Pip @('uninstall','-y','sageattn3') } catch {}
+    }
+  } else {
+    Write-Info "Skipping uninstall (SageAttention)"
+  }
 }
 
 # --------------------- Torch Auto --------------------------------------------
@@ -656,12 +771,13 @@ function PostInstall-Checks {
   Write-Section "Verify"
   $code = @'
 import importlib, json, torch
-mods = ["torch","sageattention"]
+mods = ["torch","sageattention","sageattn3"]
 out = {}
 for m in mods:
   try:
     mod = importlib.import_module(m)
-    out[m] = {"ok": True, "ver": getattr(mod,"__version__","")}
+    ver = getattr(mod,"__version__","installed")
+    out[m] = {"ok": True, "ver": str(ver)}
   except Exception as e:
     out[m] = {"ok": False, "err": str(e)}
 out["cuda"] = {"ver": getattr(torch.version,"cuda",None), "is_available": torch.cuda.is_available()}
@@ -674,7 +790,11 @@ print(json.dumps(out))
   try { $obj = $res.StdOut | ConvertFrom-Json } catch {}
   if ($null -ne $obj) {
     if ($obj.torch.ok) { Write-Ok ("torch import OK ({0})" -f $obj.torch.ver) } else { Write-Err ("torch import failed: {0}" -f $obj.torch.err) }
-    if ($obj.sageattention.ok) { Write-Ok ("sageattention import OK ({0})" -f $obj.sageattention.ver) } else { Write-Err ("sageattention import failed: {0}" -f $obj.sageattention.err) }
+    if ($obj.sageattention.ok) { Write-Ok ("sageattention (v2) import OK ({0})" -f $obj.sageattention.ver) }
+    if ($obj.sageattn3.ok) { Write-Ok ("sageattn3 (v3) import OK ({0})" -f $obj.sageattn3.ver) }
+    if (-not $obj.sageattention.ok -and -not $obj.sageattn3.ok) {
+      Write-Err "Neither sageattention nor sageattn3 could be imported."
+    }
     $cudaVer = if ($obj.cuda.ver) { $obj.cuda.ver } else { "n/a" }
     Write-Info ("CUDA runtime: {0}, available: {1}" -f $cudaVer, $obj.cuda.is_available)
   } else {
@@ -750,10 +870,66 @@ try {
     throw "Installed Torch build is CPU-only. SageAttention requires a CUDA build (e.g., cu128)."
   }
 
-  # 4) Install SageAttention 2.2 (via wheels.json, with 12.9→12.8 & optional ABI3)
-  Uninstall-Sage
+  # 4) Install SageAttention (v2 and/or v3 via wheels.json)
   $pyMM = ($pyInfo.Version -split '\.')[0..1] -join '.'
-  Install-AIWheel-FromIndex -Package 'SageAttention' -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM -SageAttentionV22Only -AllowAbi3Fallback
+  $isBlackwell = ($gpuLine -match '(?i)(RTX\s*50|Blackwell|B100|B200)')
+  $torchIsNew  = $false
+  try {
+    $tVerObj = [version]($effTorch -replace '\+.*$','')
+    if ($tVerObj -ge [version]"2.12.0") { $torchIsNew = $true }
+  } catch {}
+
+  $script:InstalledSageV2 = $false
+  $script:InstalledSageV3 = $false
+
+  Uninstall-Sage -Target 'all'
+
+  # Decide version(s) to install
+  $tryVersions = @()
+  switch ($SageVersion) {
+    '2'   { $tryVersions = @('2') }
+    '3'   { $tryVersions = @('3') }
+    'All' { $tryVersions = @('2', '3') }
+    'Auto' {
+      if ($isBlackwell -or $torchIsNew) {
+        $tryVersions = @('3', '2') # Prioritize v3 for Blackwell / modern Torch, fallback to v2
+      } else {
+        $tryVersions = @('2', '3') # Prioritize v2, fallback to v3
+      }
+    }
+  }
+
+  $installedAny = $false
+  foreach ($v in $tryVersions) {
+    $pkgLabel = if ($v -eq '3') { 'SageAttention 3' } else { 'SageAttention' }
+    try {
+      if ($v -eq '2') {
+        $installedUrl = Install-AIWheel-FromIndex -Package 'SageAttention' -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM -TargetSageVersion '2' -AllowAbi3Fallback
+        if ($installedUrl) {
+          $script:InstalledSageV2 = $true
+          $installedAny = $true
+        }
+      } elseif ($v -eq '3') {
+        $installedUrl = Install-AIWheel-FromIndex -Package 'SageAttention 3' -TorchVer $effTorch -CudaTag $effCuda -PythonMM $pyMM -TargetSageVersion '3' -AllowAbi3Fallback
+        if ($installedUrl) {
+          $script:InstalledSageV3 = $true
+          $installedAny = $true
+        }
+      }
+      # In Auto mode, stop once preferred version succeeds
+      if ($SageVersion -eq 'Auto' -and $installedAny) { break }
+    } catch {
+      if ($SageVersion -in @('2', '3')) {
+        throw
+      } else {
+        Write-Warn ("Could not install {0}: {1}" -f $pkgLabel, $_.Exception.Message)
+      }
+    }
+  }
+
+  if (-not $installedAny) {
+    throw "No matching wheel for SageAttention (Torch $effTorch, CUDA $effCuda, Python $pyMM)."
+  }
 
   # 5) Optional extras (from the same wheels.json)
   if ($AutoFetchFromAIWheels) {
@@ -766,17 +942,19 @@ try {
   # Runners
   if ($CreateBatRunner) {
     Write-Section "Run shortcuts"
-    $bat = "@echo off`r`n.\python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build --use-sage-attention`r`npause`r`n"
+    $extraArg = if ($script:InstalledSageV2) { " --use-sage-attention" } else { "" }
+    $bat = "@echo off`r`n.\python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build$extraArg`r`npause`r`n"
     if ($DryRun) { Write-Info "DRY-RUN: write run_nvidia_gpu_sageattention.bat" }
     else { Set-Content -LiteralPath ".\run_nvidia_gpu_sageattention.bat" -Value $bat -Encoding ASCII }
     Write-Ok "Created: .\run_nvidia_gpu_sageattention.bat"
   }
   if ($CreatePsRunner) {
-    $ps = @'
+    $extraArg = if ($script:InstalledSageV2) { " --use-sage-attention" } else { "" }
+    $ps = @"
 #Requires -Version 7.0
-$ErrorActionPreference = "Stop"
-& ".\python_embeded\python.exe" -s "ComfyUI\main.py" --windows-standalone-build --use-sage-attention
-'@
+`$ErrorActionPreference = "Stop"
+& ".\python_embeded\python.exe" -s "ComfyUI\main.py" --windows-standalone-build$extraArg
+"@
     if ($DryRun) { Write-Info "DRY-RUN: write Run-ComfyUI-Sage.ps1" }
     else { Set-Content -LiteralPath ".\Run-ComfyUI-Sage.ps1" -Value $ps -Encoding UTF8 }
     Write-Ok "Created: .\Run-ComfyUI-Sage.ps1"
@@ -791,10 +969,19 @@ $ErrorActionPreference = "Stop"
 
   Write-Section "Done"
   Write-Ok "Installation finished."
-  Write-Info "Start ComfyUI with SageAttention:"
+  if ($script:InstalledSageV3 -and -not $script:InstalledSageV2) {
+    Write-Info "SageAttention 3 (sageattn3) installed successfully!"
+    Write-Info "ComfyUI enables SageAttention 3 automatically for supported models/nodes (e.g., Wan2.1, LTX-Video) via the 'sage3' attention kernel."
+    Write-Info "Note: ComfyUI CLI flag --use-sage-attention is specific to SageAttention 2, so the runner launches without it."
+  }
+  Write-Info "Start ComfyUI:"
   if ($CreatePsRunner)  { Write-Host "    .\Run-ComfyUI-Sage.ps1" -ForegroundColor White }
   if ($CreateBatRunner) { Write-Host "    .\run_nvidia_gpu_sageattention.bat" -ForegroundColor White }
-  Write-Host "    or: python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build --use-sage-attention" -ForegroundColor White
+  if ($script:InstalledSageV2) {
+    Write-Host "    or: python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build --use-sage-attention" -ForegroundColor White
+  } else {
+    Write-Host "    or: python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build" -ForegroundColor White
+  }
 }
 catch {
   Write-Err ("ERROR: {0}" -f $_.Exception.Message)
