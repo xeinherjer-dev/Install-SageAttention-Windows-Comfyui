@@ -37,8 +37,8 @@ param(
   [string] $CudaTag,       # e.g., cu129 or cu128
 
   # --- SageAttention Version Selection ---
-  [ValidateSet('Auto', '2', '3', 'All')]
-  [string] $SageVersion = 'Auto',
+  [ValidateSet('2.2', '2', '3', 'Auto')]
+  [string] $SageVersion = '2.2',
 
   # --- Packages / Indexes ---
   [string] $TritonConstraint = "triton-windows<3.4",
@@ -882,20 +882,17 @@ try {
   $script:InstalledSageV2 = $false
   $script:InstalledSageV3 = $false
 
-  Uninstall-Sage -Target 'all'
-
-  # Decide version(s) to install
+  # Decide version(s) to install (Coexistence supported: only target version is reinstalled)
   $tryVersions = @()
   switch ($SageVersion) {
-    '2'   { $tryVersions = @('2') }
-    '3'   { $tryVersions = @('3') }
-    'All' { $tryVersions = @('2', '3') }
-    'Auto' {
-      if ($isBlackwell -or $torchIsNew) {
-        $tryVersions = @('3', '2') # Prioritize v3 for Blackwell / modern Torch, fallback to v2
-      } else {
-        $tryVersions = @('2', '3') # Prioritize v2, fallback to v3
-      }
+    '3' {
+      Uninstall-Sage -Target '3'
+      $tryVersions = @('3')
+    }
+    default {
+      # '2.2', '2', 'Auto': install SageAttention 2.2 without touching SageAttention 3 (coexistence)
+      Uninstall-Sage -Target '2'
+      $tryVersions = @('2')
     }
   }
 
