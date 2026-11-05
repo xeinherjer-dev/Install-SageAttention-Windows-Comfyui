@@ -449,6 +449,39 @@ function To-VersionSafe([string]$s) {
   return $null
 }
 
+function Parse-Pep440Version([string]$v) {
+  if ([string]::IsNullOrWhiteSpace($v)) { return [version]::new(0, 0, 0, 0) }
+  $clean = ($v -replace '\+.*$','').Trim()
+  $post = 0
+  if ($clean -match '\.post(\d+)') {
+    $post = [int]$Matches[1]
+    $clean = $clean -replace '\.post\d+',''
+  } elseif ($clean -match 'post(\d+)') {
+    $post = [int]$Matches[1]
+    $clean = $clean -replace 'post\d+',''
+  }
+  $parts = $clean.Split('.')
+  $major = if ($parts.Count -ge 1 -and $parts[0] -match '^\d+$') { [int]$parts[0] } else { 0 }
+  $minor = if ($parts.Count -ge 2 -and $parts[1] -match '^\d+$') { [int]$parts[1] } else { 0 }
+  $build = if ($parts.Count -ge 3 -and $parts[2] -match '^\d+$') { [int]$parts[2] } else { 0 }
+  return [version]::new($major, $minor, $build, $post)
+}
+
+function To-VersionObj([string]$s) {
+  if ([string]::IsNullOrWhiteSpace($s)) { return [version]::new(0, 0, 0, 0) }
+  $m = [regex]::Match($s, '(\d+(\.\d+)*)')
+  if ($m.Success) {
+    $vStr = $m.Groups[1].Value
+    $parts = $vStr.Split('.')
+    $major = [int]$parts[0]
+    $minor = if ($parts.Count -ge 2) { [int]$parts[1] } else { 0 }
+    $build = if ($parts.Count -ge 3) { [int]$parts[2] } else { 0 }
+    $rev   = if ($parts.Count -ge 4) { [int]$parts[3] } else { 0 }
+    return [version]::new($major, $minor, $build, $rev)
+  }
+  return [version]::new(0, 0, 0, 0)
+}
+
 function Python-Match($wheelPy, [string]$wantMM, [switch]$AllowAbi3) {
   if ($null -eq $wheelPy) { return $true } # permissive if absent
   $wantV = To-VersionSafe $wantMM
@@ -621,7 +654,23 @@ function Resolve-AIWheelsUrl {
         $pFirst = if ($wPy -is [System.Array] -or $wPy -is [System.Collections.IList]) { $wPy[0] } else { $wPy }
         if ([string]$pFirst -match [regex]::Escape($PythonMM)) { $score += 2 }
         if ($wCxxAbi -match '(?i)TRUE') { $score += 1 }
-        $cands += ,([pscustomobject]@{ url=$wUrl; score=$score; pkgId=$pkg.id; version=$pv; torch=$wTorch; py=$wPy; cuda=$wCuda })
+
+        $parsedPkgVer   = Parse-Pep440Version $pv
+        $parsedTorchMin = To-VersionObj $tFirst
+        $parsedPyMin    = To-VersionObj $pFirst
+
+        $cands += ,([pscustomobject]@{
+          url           = $wUrl
+          score         = $score
+          pkgId         = $pkg.id
+          version       = $pv
+          parsedPkgVer  = $parsedPkgVer
+          parsedTorchMin= $parsedTorchMin
+          parsedPyMin   = $parsedPyMin
+          torch         = $wTorch
+          py            = $wPy
+          cuda          = $wCuda
+        })
       }
     }
   }
@@ -640,7 +689,12 @@ function Resolve-AIWheelsUrl {
     throw "No matching wheel for $PackageName (Torch $TorchVer, CUDA $CudaTag, Python $PythonMM)."
   }
 
-  $best = $cands | Sort-Object -Property score -Descending | Select-Object -First 1
+  $best = $cands | Sort-Object -Property @(
+    @{ Expression = 'score'; Descending = $true },
+    @{ Expression = 'parsedPkgVer'; Descending = $true },
+    @{ Expression = 'parsedTorchMin'; Descending = $true },
+    @{ Expression = 'parsedPyMin'; Descending = $true }
+  ) | Select-Object -First 1
   return $best.url
 }
 
